@@ -83,6 +83,42 @@ class KakaoWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, ["L-32", "L-32"])
         main._TEST_CASE_IDS.clear()
 
+    async def test_address_change_flow_l03(self) -> None:
+        main._ADDRESS_FLOWS.clear()
+        client = SimpleNamespace(request=AsyncMock(side_effect=[
+            [], {"request_id": "ACR-1", "request_status": "SUBMITTED"},
+        ]))
+        with patch("main.ActionApiClient", return_value=client):
+            t1 = await main._handle_message(
+                "주소 잘못 넣었어요. 경기 성남시로 바꿔주세요.", "L-03", "a1")
+            t2 = await main._handle_message("123456 이야", "L-03", "a1")
+            t3 = await main._handle_message("네 맞아요", "L-03", "a1")
+            t4 = await main._handle_message(
+                "경기 성남시 분당구 판교로 12, 101동 202호", "L-03", "a1")
+        self.assertIn("주문번호", t1)
+        self.assertIn("대상이 맞나요", t2)
+        self.assertIn("상세주소", t3)
+        self.assertIn("ACR-1", t4)
+        calls = client.request.await_args_list
+        self.assertEqual(calls[0].args[:2], ("GET", "/api/shipments?order_no=123456"))
+        self.assertEqual(
+            calls[1].args[:2],
+            ("POST", "/api/orders/123456/address-change-requests"),
+        )
+        self.assertEqual(
+            calls[1].args[3],
+            {"new_address": "경기 성남시 분당구 판교로 12, 101동 202호"},
+        )
+
+    async def test_address_change_blocked_when_shipped(self) -> None:
+        main._ADDRESS_FLOWS.clear()
+        client = SimpleNamespace(request=AsyncMock(return_value=[{"status": "IN_TRANSIT"}]))
+        with patch("main.ActionApiClient", return_value=client):
+            await main._handle_message("배송지 변경해주세요 주문번호 100100003", "L-03", "a2")
+            text = await main._handle_message("네", "L-03", "a2")
+        self.assertIn("변경해 드릴 수 없어요", text)
+        self.assertEqual(client.request.await_count, 1)
+
     async def test_invalid_payload_returns_simple_text(self) -> None:
         request = SimpleNamespace(
             json=AsyncMock(return_value=[]),

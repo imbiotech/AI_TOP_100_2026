@@ -184,11 +184,160 @@ def _shipment_status_text(shipments: list[dict[str, Any]]) -> str:
     )
 
 
+_ADDRESS_FLOWS: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_BARE_NUMBER_PATTERN = re.compile(r"(?<!\d)(\d{6,12})(?!\d)")
+_DETAIL_ADDRESS_PATTERN = re.compile(
+    r"\d+\s*동|\d+\s*호|\d+-\d+|\d+\s*번지|(?:로|길)\s*\d+"
+)
+
+
+def _is_address_change(text: str) -> bool:
+    compact = text.replace(" ", "")
+    return any(term in compact for term in ("배송지", "주소")) and any(
+        term in compact for term in ("변경", "바꿔", "바꾸", "잘못", "수정")
+    )
+
+
+def _extract_new_address(text: str) -> str | None:
+    match = re.search(
+        r"([가-힣A-Za-z0-9\s\-]{2,80}?)(?:으)?로\s*(?:바꿔|변경|수정|바꾸)", text
+    )
+    if match:
+        candidate = re.sub(r"^.*?(?:잘못 넣었어요|잘못|\.)\s*", "", match.group(1)).strip()
+        if candidate and not any(w in candidate for w in ("배송지", "주소를")):
+            return candidate
+    return None
+
+
+def _is_yes(text: str) -> bool:
+    if any(term in text for term in ("아니", "아냐", "다른")):
+        return False
+    return any(term in text for term in ("네", "예", "맞", "응", "그래", "ㅇㅇ"))
+
+
+async def _handle_address_change(
+    text: str, test_case_id: str | None, user_id: str | None
+) -> str | None:
+    flow = _ADDRESS_FLOWS.get(user_id) if user_id else None
+    if flow and time.monotonic() - flow["ts"] > _CONVERSATION_TTL_SECONDS:
+        _ADDRESS_FLOWS.pop(user_id, None)
+        flow = None
+    starting = _is_address_change(text)
+    if flow is None and not starting:
+        return None
+    if flow is None:
+        flow = {"order_no": None, "address": None, "stage": "order", "ts": 0.0}
+    if user_id:
+        _ADDRESS_FLOWS[user_id] = flow
+        _ADDRESS_FLOWS.move_to_end(user_id)
+        while len(_ADDRESS_FLOWS) > _MAX_CONVERSATIONS:
+            _ADDRESS_FLOWS.popitem(last=False)
+    flow["ts"] = time.monotonic()
+
+    stage = flow["stage"]
+    new_address = _extract_new_address(text) if starting else None
+    if new_address:
+        flow["address"] = new_address
+
+    if stage == "order":
+        order_no = _extract_order_number(text)
+        if order_no is None:
+            bare = _BARE_NUMBER_PATTERN.search(text)
+            order_no = bare.group(1) if bare else None
+        if order_no is None:
+            return (
+                "배송지 변경을 도와드릴게요. 변경하실 주문의 주문번호를 알려주세요. "
+                "주문번호를 추측해 조회하지는 않습니다."
+            )
+        flow["order_no"] = order_no
+        flow["stage"] = "confirm"
+        return f"주문번호 {order_no} 주문이 이번 배송지 변경 대상이 맞나요?"
+
+    if stage == "confirm":
+        if not _is_yes(text):
+            flow["order_no"] = None
+            flow["stage"] = "order"
+            return "그럼 배송지를 변경할 주문번호를 다시 알려주세요."
+        if test_case_id is None:
+            _ADDRESS_FLOWS.pop(user_id, None)
+            return (
+                "현재 이 채널에서는 주문 상태를 확인할 수 없어요. "
+                "주문 조회가 가능한 상담 창구로 문의해 주세요."
+            )
+        try:
+            client = ActionApiClient()
+            shipments = await client.request(
+                "GET",
+                f"/api/shipments?order_no={quote(flow['order_no'], safe='')}",
+                test_case_id,
+            )
+        except ValueError:
+            return "액션 API 인증 설정이 없어 배송 조회를 진행하지 못했습니다."
+        except ActionApiError as error:
+            if error.status_code == 404:
+                flow["stage"] = "order"
+                return "해당 주문을 찾지 못했어요. 주문번호를 다시 확인해 알려주세요."
+            return "배송 조회를 일시적으로 진행하지 못했어요. 잠시 후 다시 문의해 주세요."
+        if not isinstance(shipments, list):
+            return "배송 조회 결과를 확인하지 못해 변경 접수를 하지 않았어요."
+        if shipments:
+            _ADDRESS_FLOWS.pop(user_id, None)
+            return (
+                "이미 배송이 시작된 주문이라 배송지를 변경해 드릴 수 없어요. "
+                "수령 후 필요한 도움을 말씀해 주세요."
+            )
+        flow["stage"] = "address"
+        stage = "address"
+        if flow["address"] and _DETAIL_ADDRESS_PATTERN.search(flow["address"]):
+            return await _submit_address(flow, test_case_id, user_id)
+        return (
+            "아직 집하 전이라 배송지 변경 요청을 접수할 수 있어요. "
+            f"'{flow['address'] or '새 배송지'}'의 동·호수까지 포함한 상세주소를 알려주세요."
+        )
+
+    if stage == "address":
+        if not _DETAIL_ADDRESS_PATTERN.search(text) and len(text.strip()) < 8:
+            return "동·호수까지 포함한 상세주소를 알려주세요."
+        flow["address"] = text.strip()
+        if test_case_id is None:
+            return "현재 이 채널에서는 변경 접수를 진행할 수 없어요."
+        return await _submit_address(flow, test_case_id, user_id)
+    return None
+
+
+async def _submit_address(
+    flow: dict[str, Any], test_case_id: str, user_id: str | None
+) -> str:
+    try:
+        receipt = await ActionApiClient().request(
+            "POST",
+            f"/api/orders/{quote(flow['order_no'], safe='')}/address-change-requests",
+            test_case_id,
+            {"new_address": flow["address"]},
+        )
+    except (ActionApiError, ValueError):
+        return "배송지 변경 접수를 진행하지 못했어요. 잠시 후 다시 문의해 주세요."
+    _ADDRESS_FLOWS.pop(user_id, None)
+    ref = ""
+    if isinstance(receipt, dict):
+        for key in ("request_id", "change_request_id", "id"):
+            if isinstance(receipt.get(key), str):
+                ref = f"(접수번호 {receipt[key]}) "
+                break
+    return (
+        f"주문 {flow['order_no']}의 배송지를 '{flow['address']}'(으)로 변경하는 "
+        f"요청을 접수했어요 {ref}".rstrip() + "."
+    )
+
+
 async def _handle_message(
     text: str,
     test_case_id: str | None,
     user_id: str | None,
 ) -> str:
+    address_reply = await _handle_address_change(text, test_case_id, user_id)
+    if address_reply is not None:
+        return address_reply
     previous = _known_conversation(user_id)
     explicit_order_number = _extract_order_number(text)
     rule_intent = _intent(text)
