@@ -56,6 +56,33 @@ class KakaoWebhookTests(unittest.IsolatedAsyncioTestCase):
         with patch("ai_interpreter._call", return_value={"intent": "refund_now"}):
             self.assertIsNone(await interpret_message("환불해줘"))
 
+    async def test_test_case_id_is_read_from_utterance_and_kept(self) -> None:
+        main._TEST_CASE_IDS.clear()
+        seen: list[str | None] = []
+
+        async def fake_handle(text, test_case_id, user_id):
+            seen.append(test_case_id)
+            return "ok"
+
+        def make(utterance: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                json=AsyncMock(
+                    return_value={
+                        "userRequest": {
+                            "utterance": utterance,
+                            "user": {"id": "tc-user"},
+                        }
+                    }
+                ),
+                headers={},
+            )
+
+        with patch("main._handle_message", fake_handle):
+            await main.kakao_webhook(make("[TC: L-32] 주문번호 100100003"))
+            await main.kakao_webhook(make("병원 다녀왔어요"))
+        self.assertEqual(seen, ["L-32", "L-32"])
+        main._TEST_CASE_IDS.clear()
+
     async def test_invalid_payload_returns_simple_text(self) -> None:
         request = SimpleNamespace(
             json=AsyncMock(return_value=[]),

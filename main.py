@@ -23,6 +23,10 @@ _ORDER_NUMBER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TEST_CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_TEXT_TEST_CASE_ID_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._-])([A-Z]{1,3}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9._-])"
+)
+_TEST_CASE_IDS: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _CONVERSATION_TTL_SECONDS = 600
 _MAX_CONVERSATIONS = 256
 
@@ -381,10 +385,26 @@ async def kakao_webhook(request: Request) -> dict[str, Any]:
     if not isinstance(utterance, str) or not utterance.strip():
         return _simple_text("문의 내용을 확인하지 못했습니다. 메시지를 다시 보내주세요.")
 
+    user_id = _user_id(body)
+    test_case_id = _test_case_id(body, request.headers)
+    match = _TEXT_TEST_CASE_ID_PATTERN.search(utterance)
+    if test_case_id is None and match:
+        test_case_id = match.group(1)
+    if user_id is not None:
+        if test_case_id is not None:
+            _TEST_CASE_IDS[user_id] = (test_case_id, time.monotonic())
+            _TEST_CASE_IDS.move_to_end(user_id)
+            while len(_TEST_CASE_IDS) > _MAX_CONVERSATIONS:
+                _TEST_CASE_IDS.popitem(last=False)
+        else:
+            saved = _TEST_CASE_IDS.get(user_id)
+            if saved and time.monotonic() - saved[1] <= _CONVERSATION_TTL_SECONDS:
+                test_case_id = saved[0]
+
     response_text = await _handle_message(
         utterance.strip(),
-        _test_case_id(body, request.headers),
-        _user_id(body),
+        test_case_id,
+        user_id,
     )
     return _simple_text(response_text)
 
