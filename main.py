@@ -11,6 +11,7 @@ import dotenv
 from fastapi import FastAPI, Request
 
 from action_client import ActionApiClient, ActionApiError
+from ai_interpreter import interpret_message
 
 
 dotenv.load_dotenv()
@@ -121,6 +122,12 @@ def _clear_conversation(user_id: str | None) -> None:
         _CONVERSATIONS.pop(user_id, None)
 
 
+def _says_order_number_unknown(text: str) -> bool:
+    return "주문번호" in text.replace(" ", "") and any(
+        term in text for term in ("모르", "몰라", "기억", "없어")
+    )
+
+
 def _intent(text: str) -> str:
     lowered = text.lower()
     if any(term in lowered for term in ("병원비", "진료비", "치료비", "배상")):
@@ -130,6 +137,11 @@ def _intent(text: str) -> str:
         for term in ("배송", "택배", "송장", "미수령", "못 받")
     ):
         return "shipping"
+    if any(
+        term in lowered
+        for term in ("반품", "교환", "변심", "안 먹", "먹기 싫", "먹고 싶지")
+    ):
+        return "return"
     if any(term in lowered for term in ("주문", "환불", "취소", "결제")):
         return "order"
     if any(term in lowered for term in ("배탈", "복통", "구토", "설사", "아프")):
@@ -175,12 +187,29 @@ async def _handle_message(
 ) -> str:
     previous = _known_conversation(user_id)
     explicit_order_number = _extract_order_number(text)
-    intent = _intent(text)
+    rule_intent = _intent(text)
+    interpretation = await interpret_message(
+        text, previous.intent if previous else None
+    )
+    intent = rule_intent
+    order_number_unknown = _says_order_number_unknown(text)
+    if interpretation is not None:
+        order_number_unknown = order_number_unknown or (
+            previous is not None and interpretation.order_number_unknown
+        )
+        explicit_order_number = (
+            explicit_order_number or interpretation.order_number
+        )
+        if interpretation.intent != "general":
+            intent = interpretation.intent
+        # Escalation requires an explicit compensation request by the rules.
+        if intent == "claim" and rule_intent != "claim":
+            intent = "health"
     if (
         intent == "order"
         and explicit_order_number
         and previous
-        and previous.intent in {"health", "claim", "shipping", "order"}
+        and previous.intent in {"health", "claim", "shipping", "order", "return"}
     ):
         intent = previous.intent
 
@@ -209,7 +238,20 @@ async def _handle_message(
             "현재 몸 상태가 걱정되시면 진료를 받아 주세요. 확인을 위해 주문번호를 알려주시겠어요?"
         )
 
+    if not order_number and order_number_unknown:
+        return (
+            "주문번호를 모르셔도 괜찮아요. 주문 완료 문자나 알림톡, 주문 내역 화면에서 "
+            "확인할 수 있어요. 확인이 어렵다면 상품명과 주문 시기를 알려주세요. "
+            "다만 주문번호 없이 주문 정보를 추측해 안내하지는 않습니다."
+        )
+
     if not order_number:
+        if intent == "return":
+            return (
+                "반품 가능 여부는 상품 종류와 수령 상태에 따라 달라 주문 확인이 필요해요. "
+                "주문번호를 알려주시면 확인해 드릴게요. 환불이나 반품을 "
+                "확정해서 안내하지는 못하는 점 양해 부탁드려요."
+            )
         if claim_requested:
             return (
                 "상황을 확인해 담당자 검토가 필요할 수 있어요. 먼저 대상 주문번호와 "
@@ -296,6 +338,11 @@ async def _handle_message(
                 "준비해 주세요. 회신 기한은 영업일 3일입니다."
             )
 
+        if intent == "return":
+            return (
+                f"{_order_status_text(order)} 반품 가능 여부는 상품과 수령 상태에 "
+                "따라 달라 아직 확정할 수 없어요. 상품 상태와 사유를 알려주세요."
+            )
         return _order_status_text(order)
     except ActionApiError as error:
         if error.status_code == 429:

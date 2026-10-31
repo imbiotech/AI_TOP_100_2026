@@ -40,6 +40,9 @@ class ActionApiClientTests(unittest.TestCase):
             sent_request.get_header("X-aitop100-test-case-id"), "L-32"
         )
         self.assertEqual(
+            sent_request.get_header("User-agent"), "gyodong-cs-agent/1.0"
+        )
+        self.assertEqual(
             json.loads(sent_request.data),
             {"lane": "LANE2_HANDOFF", "reason": "review"},
         )

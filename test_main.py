@@ -3,11 +3,58 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
-
+from ai_interpreter import Interpretation, interpret_message
 
 class KakaoWebhookTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main._CONVERSATIONS.clear()
+        patcher = patch("main.interpret_message", AsyncMock(return_value=None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_ai_interpretation_routes_free_form_message(self) -> None:
+        interpretation = Interpretation("return", None, True)
+        main._remember_conversation("u2", "return", None)
+        with patch(
+            "main.interpret_message", AsyncMock(return_value=interpretation)
+        ):
+            text = await main._handle_message(
+                "모른다니까 집 앞에 왔는데 안 먹고 싶어", None, "u2"
+            )
+        self.assertIn("모르셔도 괜찮아요", text)
+
+    async def test_ai_unknown_flag_ignored_on_first_message(self) -> None:
+        with patch(
+            "main.interpret_message",
+            AsyncMock(return_value=Interpretation("return", None, True)),
+        ):
+            text = await main._handle_message("반품해죠", None, "u4")
+        self.assertIn("반품 가능 여부", text)
+
+    async def test_ai_claim_does_not_escalate_without_explicit_request(self) -> None:
+        interpretation = Interpretation("claim", "100100003", False)
+        client = SimpleNamespace(request=AsyncMock(side_effect=[
+            {"order_no": "100100003", "status": "PAID"}, [],
+        ]))
+        with patch(
+            "main.interpret_message", AsyncMock(return_value=interpretation)
+        ), patch("main.ActionApiClient", return_value=client):
+            await main._handle_message("100100003 먹고 속이 안 좋아", "L-32", "u3")
+        methods = [call.args[0] for call in client.request.await_args_list]
+        self.assertNotIn("POST", methods)
+
+    async def test_interpreter_rejects_invented_order_number(self) -> None:
+        with patch(
+            "ai_interpreter._call",
+            return_value={"intent": "order", "order_number": "999999999"},
+        ):
+            result = await interpret_message("주문 확인해줘")
+        self.assertIsNotNone(result)
+        self.assertIsNone(result.order_number)
+
+    async def test_interpreter_rejects_unknown_intent(self) -> None:
+        with patch("ai_interpreter._call", return_value={"intent": "refund_now"}):
+            self.assertIsNone(await interpret_message("환불해줘"))
 
     async def test_invalid_payload_returns_simple_text(self) -> None:
         request = SimpleNamespace(
@@ -102,6 +149,15 @@ class KakaoWebhookTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLessEqual(len(claim_response), 500)
         self.assertNotIn("kakao-user", main._CONVERSATIONS)
+
+    async def test_return_and_unknown_order_number_get_distinct_guidance(self) -> None:
+        main._CONVERSATIONS.clear()
+        ret = await main._handle_message("반품해죠", None, "u1")
+        unknown = await main._handle_message("주문번호는 모르는데", None, "u1")
+        self.assertIn("반품 가능 여부", ret)
+        self.assertIn("모르셔도 괜찮아요", unknown)
+        self.assertNotEqual(ret, unknown)
+        self.assertEqual(main._intent("안 먹고 싶어 반품해줘"), "return")
 
     async def test_webhook_uses_only_simple_text_output(self) -> None:
         request = SimpleNamespace(

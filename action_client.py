@@ -69,6 +69,7 @@ class ActionApiClient:
                 "Authorization": f"Bearer {self._token}",
                 "X-Aitop100-Test-Case-Id": test_case_id,
                 "Accept": "application/json",
+                "User-Agent": "gyodong-cs-agent/1.0",
                 **({"Content-Type": "application/json"} if body is not None else {}),
             },
         )
