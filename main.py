@@ -24,7 +24,10 @@ _ORDER_NUMBER_PATTERN = re.compile(
 )
 _TEST_CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 _TEXT_TEST_CASE_ID_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9._-])([A-Z]{1,3}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9._-])"
+    r"(?:(?<![A-Za-z0-9._-])(?:id|tc(?:[ _-]?id)?|상담\s*id)\s*[:：=]\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]{0,99}))"
+    r"|(?<![A-Za-z0-9._-])([A-Z]{1,3}-\d{2,3}(?:-[a-z])?)(?![A-Za-z0-9._-])",
+    re.IGNORECASE,
 )
 _TEST_CASE_IDS: OrderedDict[str, tuple[str, float]] = OrderedDict()
 _CONVERSATION_TTL_SECONDS = 600
@@ -538,7 +541,7 @@ async def kakao_webhook(request: Request) -> dict[str, Any]:
     test_case_id = _test_case_id(body, request.headers)
     match = _TEXT_TEST_CASE_ID_PATTERN.search(utterance)
     if test_case_id is None and match:
-        test_case_id = match.group(1)
+        test_case_id = match.group(1) or match.group(2)
     if user_id is not None:
         if test_case_id is not None:
             _TEST_CASE_IDS[user_id] = (test_case_id, time.monotonic())

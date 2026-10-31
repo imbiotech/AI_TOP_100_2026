@@ -80,7 +80,9 @@ class KakaoWebhookTests(unittest.IsolatedAsyncioTestCase):
         with patch("main._handle_message", fake_handle):
             await main.kakao_webhook(make("[TC: L-32] 주문번호 100100003"))
             await main.kakao_webhook(make("병원 다녀왔어요"))
-        self.assertEqual(seen, ["L-32", "L-32"])
+            await main.kakao_webhook(make("상담 정보 id: HX-9-z 인입 계정: 홍길동 안녕"))
+            await main.kakao_webhook(make("다음 질문"))
+        self.assertEqual(seen, ["L-32", "L-32", "HX-9-z", "HX-9-z"])
         main._TEST_CASE_IDS.clear()
 
     async def test_address_change_flow_l03(self) -> None:
