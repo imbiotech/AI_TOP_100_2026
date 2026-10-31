@@ -11,6 +11,7 @@ from urllib.parse import quote
 import dotenv
 from fastapi import FastAPI, Request
 
+import agent
 from action_client import ActionApiClient, ActionApiError
 from ai_interpreter import interpret_message
 
@@ -588,11 +589,15 @@ async def kakao_webhook(request: Request) -> dict[str, Any]:
             if saved and time.monotonic() - saved[1] <= _CONVERSATION_TTL_SECONDS:
                 test_case_id = saved[0]
 
-    response_text = await _handle_message(
-        utterance.strip(),
-        test_case_id,
-        user_id,
+    response_text = await agent.respond(
+        utterance.strip(), user_id, test_case_id
     )
+    if response_text is None:
+        response_text = await _handle_message(
+            utterance.strip(),
+            test_case_id,
+            user_id,
+        )
     return _simple_text(response_text)
 
 

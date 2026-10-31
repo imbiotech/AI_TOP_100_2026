@@ -8,6 +8,9 @@ from ai_interpreter import Interpretation, interpret_message
 class KakaoWebhookTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         main._CONVERSATIONS.clear()
+        agent_patcher = patch("main.agent.respond", AsyncMock(return_value=None))
+        agent_patcher.start()
+        self.addCleanup(agent_patcher.stop)
         patcher = patch("main.interpret_message", AsyncMock(return_value=None))
         patcher.start()
         self.addCleanup(patcher.stop)
