@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections import OrderedDict
@@ -78,6 +79,37 @@ def _test_case_id(body: dict[str, Any], headers: Any) -> str | None:
         ):
             return candidate
     return None
+
+
+_PAYLOAD_TC_PATTERN = re.compile(r"[A-Z]{1,3}-\d{2,3}(?:-[a-z])?")
+logger = logging.getLogger("uvicorn.error")
+
+
+def _find_tc_in_payload(value: Any, skip_utterance: bool = True) -> str | None:
+    """Search every non-utterance string in the Kakao payload for a TC ID."""
+    if isinstance(value, str):
+        return value if _PAYLOAD_TC_PATTERN.fullmatch(value.strip()) else None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if skip_utterance and key == "utterance":
+                continue
+            found = _find_tc_in_payload(item, skip_utterance)
+            if found:
+                return found.strip()
+    if isinstance(value, list):
+        for item in value:
+            found = _find_tc_in_payload(item, skip_utterance)
+            if found:
+                return found.strip()
+    return None
+
+
+def _payload_shape(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, dict) and depth < 4:
+        return {k: _payload_shape(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_payload_shape(value[0], depth + 1)] if value else []
+    return type(value).__name__
 
 
 def _user_id(body: dict[str, Any]) -> str | None:
@@ -539,6 +571,9 @@ async def kakao_webhook(request: Request) -> dict[str, Any]:
 
     user_id = _user_id(body)
     test_case_id = _test_case_id(body, request.headers)
+    if test_case_id is None:
+        test_case_id = _find_tc_in_payload(body)
+    logger.info("kakao payload keys=%s", _payload_shape(body))
     match = _TEXT_TEST_CASE_ID_PATTERN.search(utterance)
     if test_case_id is None and match:
         test_case_id = match.group(1) or match.group(2)
